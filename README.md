@@ -1,6 +1,7 @@
 # Multimodal SAR-optical fusion for cloud removal in Sentinel-2 imagery
 
 **Cloud removal framework using conditional GANs and multi-seasonal SAR-optical data fusion** 
+
 *Master 2 Earth Observation and Geoinformatics (OTG) • University of Strasbourg • 2026*
 
 ---
