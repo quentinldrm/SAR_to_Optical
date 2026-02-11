@@ -102,4 +102,4 @@ Email: quentinledermann@outlook.fr
 
 ---
 
-**© 2026 - Personal Research Project - University of Strasbourg**
+**© 2026 - Personal Research Project - Quentin Ledermann**
