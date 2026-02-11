@@ -1,15 +1,15 @@
 """
-Script d'entraînement Pix2Pix pour traduction SAR vers Optique
+Pix2Pix Training Script for SAR to Optical Translation
 
-Implémentation complète avec :
+Complete implementation featuring:
 - GAN Loss + L1 Loss (lambda=100)
-- Optimiseurs Adam (lr=0.0002, beta1=0.5, beta2=0.999)
+- Adam optimizers (lr=0.0002, beta1=0.5, beta2=0.999)
 - Mixed Precision Training (AMP)
-- Métriques de validation (PSNR, SSIM)
-- Split train/validation
-- Sauvegarde des checkpoints
+- Validation metrics (PSNR, SSIM)
+- Train/validation split
+- Checkpoint saving
 
-Basé sur : Isola et al. (2017)
+Based on: Isola et al. (2017)
 "Image-to-Image Translation with Conditional Adversarial Networks"
 """
 
@@ -32,15 +32,19 @@ from model import UNetGenerator, PatchGANDiscriminator
 
 def calculate_psnr(img1, img2, max_value=1.0):
     """
-    Calcule le Peak Signal-to-Noise Ratio (PSNR).
+    Calculate Peak Signal-to-Noise Ratio (PSNR).
+    
+    PSNR measures the quality of reconstructed images compared to originals.
+    Higher values indicate better reconstruction quality.
+    Typical range for good quality: 20-40 dB
 
     Args:
-        img1 (torch.Tensor): Image prédite (B, C, H, W)
-        img2 (torch.Tensor): Image cible (B, C, H, W)
-        max_value (float): Valeur maximale des pixels
+        img1 (torch.Tensor): Predicted image (B, C, H, W)
+        img2 (torch.Tensor): Target image (B, C, H, W)
+        max_value (float): Maximum pixel value (1.0 for normalized images)
 
     Returns:
-        float: PSNR moyen sur le batch
+        float: Average PSNR across the batch in dB
     """
     mse = torch.mean((img1 - img2) ** 2, dim=[1, 2, 3])
     psnr = 20 * torch.log10(max_value / torch.sqrt(mse))
@@ -49,30 +53,40 @@ def calculate_psnr(img1, img2, max_value=1.0):
 
 def calculate_ssim(img1, img2, window_size=11, channel=3):
     """
-    Calcule le Structural Similarity Index (SSIM).
+    Calculate Structural Similarity Index (SSIM).
+    
+    SSIM measures perceptual similarity between images, considering
+    luminance, contrast, and structure. More closely aligned with
+    human visual perception than MSE-based metrics.
+    Range: [-1, 1], where 1 indicates perfect similarity.
 
     Args:
-        img1 (torch.Tensor): Image prédite (B, C, H, W)
-        img2 (torch.Tensor): Image cible (B, C, H, W)
-        window_size (int): Taille de la fenêtre gaussienne
-        channel (int): Nombre de canaux
+        img1 (torch.Tensor): Predicted image (B, C, H, W)
+        img2 (torch.Tensor): Target image (B, C, H, W)
+        window_size (int): Gaussian window size
+        channel (int): Number of channels
 
     Returns:
-        float: SSIM moyen sur le batch
+        float: Average SSIM across the batch
     """
+    # Convert from [-1, 1] to [0, 1] range
     img1 = (img1 + 1) / 2
     img2 = (img2 + 1) / 2
 
-    C1 = (0.01) ** 2
-    C2 = (0.03) ** 2
+    # Constants for numerical stability (from original SSIM paper)
+    C1 = (0.01) ** 2  # Stabilize luminance comparison
+    C2 = (0.03) ** 2  # Stabilize contrast comparison
 
+    # Calculate means
     mu1 = torch.mean(img1, dim=[2, 3], keepdim=True)
     mu2 = torch.mean(img2, dim=[2, 3], keepdim=True)
 
+    # Calculate variances and covariance
     sigma1_sq = torch.mean((img1 - mu1) ** 2, dim=[2, 3], keepdim=True)
     sigma2_sq = torch.mean((img2 - mu2) ** 2, dim=[2, 3], keepdim=True)
     sigma12 = torch.mean((img1 - mu1) * (img2 - mu2), dim=[2, 3], keepdim=True)
 
+    # SSIM formula
     ssim_map = ((2 * mu1 * mu2 + C1) * (2 * sigma12 + C2)) / (
         (mu1**2 + mu2**2 + C1) * (sigma1_sq + sigma2_sq + C2)
     )
@@ -82,17 +96,18 @@ def calculate_ssim(img1, img2, window_size=11, channel=3):
 
 class SEN12Dataset(Dataset):
     """
-    Dataset pour triplets SAR + S2 Cloudy → S2 Clear.
+    PyTorch Dataset for SAR + Cloudy Optical → Clear Optical triplets.
     
-    Modes de chargement :
-    - 'csv' : Charge les triplets depuis un fichier CSV
-    - 'auto' : Découvre automatiquement tous les triplets disponibles
+    Loading modes:
+    - 'csv': Load triplets from a CSV file (recommended for cleaned datasets)
+    - 'auto': Automatically discover all available triplets
     
     Args:
-        data_folder (str): Dossier racine du dataset
-        csv_file (str, optional): Chemin vers le CSV (requis si mode='csv')
-        mode (str): Mode de découverte ('csv' ou 'auto')
-        transform (callable, optional): Transformations à appliquer
+        data_folder (str): Root directory of the dataset
+        csv_file (str, optional): Path to CSV file (required if mode='csv')
+        mode (str): Discovery mode ('csv' or 'auto')
+        transform (callable, optional): Transformations to apply
+        augment (bool): Whether to apply data augmentation
     """
 
     def __init__(self, data_folder, csv_file=None, mode='auto', transform=None, augment=True):
@@ -103,27 +118,37 @@ class SEN12Dataset(Dataset):
         
         if mode == 'csv':
             if csv_file is None:
-                raise ValueError("csv_file requis en mode 'csv'")
+                raise ValueError("csv_file required in 'csv' mode")
             self._load_from_csv(csv_file)
         elif mode == 'auto':
             self._auto_discover_triplets()
         else:
-            raise ValueError(f"Mode inconnu : {mode}")
+            raise ValueError(f"Unknown mode: {mode}")
 
-        print(f"Dataset chargé : {len(self.triplets)} triplets (mode={mode})")
+        print(f"Dataset loaded: {len(self.triplets)} triplets (mode={mode})")
     
     def _load_from_csv(self, csv_file):
-        """Load triplets from CSV file. Supports old (7 cols) and new (10 cols) formats."""
+        """
+        Load triplets from CSV file.
+        
+        Supports three CSV formats:
+        - 10 columns: Full format with root folders (multi-season)
+        - 7 columns: Legacy format (summer only)
+        - 4 columns: Minimal format
+        
+        Args:
+            csv_file (str): Path to CSV file
+        """
         with open(csv_file, "r") as f:
             lines = f.readlines()
             
         for i, line in enumerate(lines):
-            if i == 0:
+            if i == 0:  # Skip header
                 continue
             
             parts = line.strip().split(",")
             if len(parts) == 10:
-                # Nouveau format avec root_folders (multisaison)
+                # New format with root folders (multi-season support)
                 patch_id, s1_root, s1_folder, s1_file, s2_root, s2_folder, s2_file, s2_cloudy_root, s2_cloudy_folder, s2_cloudy_file = parts
                 self.triplets.append({
                     "id": patch_id,
@@ -138,7 +163,7 @@ class SEN12Dataset(Dataset):
                     "s2_cloudy_file": s2_cloudy_file,
                 })
             elif len(parts) == 7:
-                # Ancien format (rétrocompatibilité summer only)
+                # Legacy format (backward compatibility for summer only)
                 patch_id, s1_folder, s1_file, s2_folder, s2_file, s2_cloudy_folder, s2_cloudy_file = parts
                 self.triplets.append({
                     "id": patch_id,
@@ -153,7 +178,7 @@ class SEN12Dataset(Dataset):
                     "s2_cloudy_file": s2_cloudy_file,
                 })
             elif len(parts) == 4:
-                # Format minimal
+                # Minimal format
                 patch_id, s1_folder, s2_folder, s2_cloudy_folder = parts
                 self.triplets.append({
                     "id": patch_id,
@@ -169,12 +194,18 @@ class SEN12Dataset(Dataset):
                 })
     
     def _auto_discover_triplets(self):
-        """Découvre automatiquement tous les triplets disponibles (toutes saisons)."""
-        # Chercher TOUS les dossiers qui matchent les patterns (summer, winter, etc.)
+        """
+        Automatically discover all available triplets (all seasons).
+        
+        Searches for matching SAR, clear optical, and cloudy optical patches
+        across all seasonal folders (summer, winter, etc.).
+        """
+        # Find ALL folders matching patterns (summer, winter, etc.)
         s1_folders = list(self.data_folder.glob("ROIs*_s1"))
         s2_folders = list(self.data_folder.glob("ROIs*_s2"))
         s2_cloudy_folders = list(self.data_folder.glob("ROIs*_s2_cloudy"))
         
+        # Build patch dictionaries for each modality
         s1_patches = {}
         for s1_folder in s1_folders:
             if s1_folder.exists():
@@ -205,6 +236,7 @@ class SEN12Dataset(Dataset):
                         patch_id = f"{season}_{patch_name}"
                         s2_cloudy_patches[patch_id] = (s2_cloudy_folder.name, folder.name)
         
+        # Find complete triplets (intersection of all three modalities)
         complete_patches = set(s1_patches.keys()) & set(s2_patches.keys()) & set(s2_cloudy_patches.keys())
         
         for patch_id in sorted(complete_patches):
@@ -215,238 +247,211 @@ class SEN12Dataset(Dataset):
                 "id": patch_id,
                 "s1_root_folder": s1_root,
                 "s1_folder": s1_folder,
+                "s1_file": None,
                 "s2_root_folder": s2_root,
                 "s2_folder": s2_folder,
+                "s2_file": None,
                 "s2_cloudy_root_folder": s2_cloudy_root,
                 "s2_cloudy_folder": s2_cloudy_folder,
+                "s2_cloudy_file": None,
             })
+
+    @staticmethod
+    def normalize_sar(sar_array):
+        """
+        Normalize SAR backscatter values to [-1, 1] range.
         
-        print(f"  S1: {len(s1_patches)} | S2: {len(s2_patches)} | S2_cloudy: {len(s2_cloudy_patches)}")
-        print(f"  Triplets complets: {len(complete_patches)}")
+        SAR data typically ranges from -30 to 0 dB. This normalization
+        preserves the physical relationship while scaling to the GAN's
+        expected input range.
+        
+        Args:
+            sar_array (np.ndarray): SAR values in dB scale
+        
+        Returns:
+            np.ndarray: Normalized array in [-1, 1]
+        """
+        sar_clipped = np.clip(sar_array, -30, 0)  # Clip extreme outliers
+        return (sar_clipped + 30) / 30 * 2 - 1  # Map: -30dB → -1, 0dB → 1
+
+    @staticmethod
+    def normalize_optical(optical_array):
+        """
+        Normalize optical reflectance values to [-1, 1] range.
+        
+        Sentinel-2 data ranges from 0-10000. Division by 5000 centers
+        typical vegetation reflectance (3000-4000) around 0.
+        
+        Args:
+            optical_array (np.ndarray): Reflectance values (0-10000)
+        
+        Returns:
+            np.ndarray: Normalized array in [-1, 1]
+        """
+        return (optical_array / 5000.0) - 1.0
+
+    @staticmethod
+    def denormalize_optical(normalized_array):
+        """
+        Reverse optical normalization for visualization.
+        
+        Args:
+            normalized_array (np.ndarray): Normalized values in [-1, 1]
+        
+        Returns:
+            np.ndarray: Reflectance values in 0-10000 range
+        """
+        return (normalized_array + 1.0) * 5000.0
 
     def __len__(self):
-        """
-        Retourne la taille effective du dataset.
-        Avec augmentation : chaque triplet génère 4 variations (×4).
-        """
-        if self.augment:
-            return len(self.triplets) * 4  # Original + flip_h + flip_v + flip_hv
+        """Return the total number of triplets."""
         return len(self.triplets)
-
-    def split_train_val(self, val_split=0.15, seed=42):
-        """
-        Sépare le dataset en ensembles train/validation.
-
-        Args:
-            val_split (float): Proportion de validation
-            seed (int): Seed pour la reproductibilité
-
-        Returns:
-            tuple: (train_dataset, val_dataset)
-        """
-        import random
-        random.seed(seed)
-        torch.manual_seed(seed)
-        
-        indices = list(range(len(self.triplets)))
-        random.shuffle(indices)
-        
-        val_size = int(len(indices) * val_split)
-        val_indices = indices[:val_size]
-        train_indices = indices[val_size:]
-        
-        train_triplets = [self.triplets[i] for i in train_indices]
-        val_triplets = [self.triplets[i] for i in val_indices]
-        
-        train_dataset = SEN12Dataset.__new__(SEN12Dataset)
-        train_dataset.data_folder = self.data_folder
-        train_dataset.transform = self.transform
-        train_dataset.augment = True
-        train_dataset.triplets = train_triplets
-        
-        val_dataset = SEN12Dataset.__new__(SEN12Dataset)
-        val_dataset.data_folder = self.data_folder
-        val_dataset.transform = self.transform
-        val_dataset.augment = False
-        val_dataset.triplets = val_triplets
-
-        print(f"Split : {len(train_triplets)} triplets → {len(train_dataset)} train samples (with augmentation)")
-        print(f"        {len(val_triplets)} triplets → {len(val_dataset)} val samples (no augmentation)")
-        return train_dataset, val_dataset
 
     def __getitem__(self, idx):
         """
-        Retourne un triplet (input, target, patch_id).
+        Get a single triplet sample.
         
-        Avec augmentation, chaque triplet génère 4 variations:
-        - idx % 4 == 0 : Original
-        - idx % 4 == 1 : Flip horizontal
-        - idx % 4 == 2 : Flip vertical  
-        - idx % 4 == 3 : Flip horizontal + vertical
+        Workflow:
+        1. Load SAR, clear optical, and cloudy optical images
+        2. Apply normalization to each modality
+        3. Apply data augmentation if enabled
+        4. Concatenate SAR + cloudy as input condition
+        
+        Args:
+            idx (int): Sample index
         
         Returns:
-            tuple: (input_tensor, target_tensor, patch_id)
-                - input : (5, H, W) - VV, VH, R_cloudy, G_cloudy, B_cloudy
-                - target : (3, H, W) - R_clear, G_clear, B_clear
-                - patch_id : str - Identifiant du patch pour traçabilité
+            dict: {
+                'condition': Input tensor (5, 256, 256) - SAR VV/VH + cloudy RGB
+                'target': Target tensor (3, 256, 256) - clear RGB
+            }
         """
-        # Calculer l'indice réel du triplet et la variation d'augmentation
-        if self.augment:
-            triplet_idx = idx // 4
-            aug_variant = idx % 4
-        else:
-            triplet_idx = idx
-            aug_variant = 0
-            
-        triplet = self.triplets[triplet_idx]
-
-        # Utiliser root_folders pour supporter multisaison
+        triplet = self.triplets[idx]
+        
+        # Build file paths with multi-season support
         s1_root = triplet.get("s1_root_folder", "ROIs1868_summer_s1")
         s2_root = triplet.get("s2_root_folder", "ROIs1868_summer_s2")
         s2_cloudy_root = triplet.get("s2_cloudy_root_folder", "ROIs1868_summer_s2_cloudy")
         
-        s1_path = self.data_folder / s1_root / triplet["s1_folder"]
-        s2_path = self.data_folder / s2_root / triplet["s2_folder"]
-        s2_cloudy_path = self.data_folder / s2_cloudy_root / triplet["s2_cloudy_folder"]
-
-        if triplet.get("s1_file"):
-            s1_file = s1_path / triplet["s1_file"]
-            s2_file = s2_path / triplet["s2_file"]
-            s2_cloudy_file = s2_cloudy_path / triplet["s2_cloudy_file"]
+        # Construct full paths
+        s1_folder_path = self.data_folder / s1_root / triplet["s1_folder"]
+        s2_folder_path = self.data_folder / s2_root / triplet["s2_folder"]
+        s2_cloudy_folder_path = self.data_folder / s2_cloudy_root / triplet["s2_cloudy_folder"]
+        
+        # Find .tif files (flexible naming)
+        if triplet["s1_file"]:
+            s1_path = s1_folder_path / triplet["s1_file"]
         else:
-            s1_file = list(s1_path.glob("*.tif"))[0]
-            s2_file = list(s2_path.glob("*.tif"))[0]
-            s2_cloudy_file = list(s2_cloudy_path.glob("*.tif"))[0]
+            s1_files = list(s1_folder_path.glob("*.tif"))
+            s1_path = s1_files[0] if s1_files else None
+        
+        if triplet["s2_file"]:
+            s2_path = s2_folder_path / triplet["s2_file"]
+        else:
+            s2_files = list(s2_folder_path.glob("*.tif"))
+            s2_path = s2_files[0] if s2_files else None
+        
+        if triplet["s2_cloudy_file"]:
+            s2_cloudy_path = s2_cloudy_folder_path / triplet["s2_cloudy_file"]
+        else:
+            s2_cloudy_files = list(s2_cloudy_folder_path.glob("*.tif"))
+            s2_cloudy_path = s2_cloudy_files[0] if s2_cloudy_files else None
 
-        with rasterio.open(s1_file) as src:
-            vv_raw = src.read(1)
-            vh_raw = src.read(2)
+        # Load SAR (VV and VH channels)
+        with rasterio.open(s1_path) as src:
+            sar = src.read([1, 2]).astype(np.float32)  # Shape: (2, 256, 256)
+        
+        # Load optical RGB (bands 4, 3, 2 = Red, Green, Blue)
+        with rasterio.open(s2_path) as src:
+            s2_clear = src.read([4, 3, 2]).astype(np.float32)  # Shape: (3, 256, 256)
+        
+        with rasterio.open(s2_cloudy_path) as src:
+            s2_cloudy = src.read([4, 3, 2]).astype(np.float32)  # Shape: (3, 256, 256)
 
-        vv = self.normalize_sar_vv(vv_raw)
-        vh = self.normalize_sar_vh(vh_raw)
+        # Apply normalization
+        sar = self.normalize_sar(sar)
+        s2_clear = self.normalize_optical(s2_clear)
+        s2_cloudy = self.normalize_optical(s2_cloudy)
 
-        with rasterio.open(s2_cloudy_file) as src:
-            bands_cloudy = src.read()
+        # Convert to PyTorch tensors
+        sar = torch.from_numpy(sar)
+        s2_clear = torch.from_numpy(s2_clear)
+        s2_cloudy = torch.from_numpy(s2_cloudy)
 
-        r_cloudy = self.normalize_optical(bands_cloudy[3])
-        g_cloudy = self.normalize_optical(bands_cloudy[2])
-        b_cloudy = self.normalize_optical(bands_cloudy[1])
+        # Apply data augmentation if enabled
+        if self.augment:
+            # Random horizontal flip
+            if torch.rand(1) > 0.5:
+                sar = torch.flip(sar, dims=[2])
+                s2_clear = torch.flip(s2_clear, dims=[2])
+                s2_cloudy = torch.flip(s2_cloudy, dims=[2])
+            
+            # Random vertical flip
+            if torch.rand(1) > 0.5:
+                sar = torch.flip(sar, dims=[1])
+                s2_clear = torch.flip(s2_clear, dims=[1])
+                s2_cloudy = torch.flip(s2_cloudy, dims=[1])
+            
+            # Random 90° rotation (0°, 90°, 180°, 270°)
+            k = torch.randint(0, 4, (1,)).item()
+            if k > 0:
+                sar = torch.rot90(sar, k, dims=[1, 2])
+                s2_clear = torch.rot90(s2_clear, k, dims=[1, 2])
+                s2_cloudy = torch.rot90(s2_cloudy, k, dims=[1, 2])
 
-        with rasterio.open(s2_file) as src:
-            bands_clear = src.read()
+        # Apply custom transform if provided
+        if self.transform:
+            sar = self.transform(sar)
+            s2_clear = self.transform(s2_clear)
+            s2_cloudy = self.transform(s2_cloudy)
 
-        r_clear = self.normalize_optical(bands_clear[3])
-        g_clear = self.normalize_optical(bands_clear[2])
-        b_clear = self.normalize_optical(bands_clear[1])
+        # Concatenate SAR and cloudy optical as input condition
+        condition = torch.cat([sar, s2_cloudy], dim=0)  # (5, 256, 256)
 
-        # VÉRIFICATION ORDRE DES CANAUX (Correct ✓)
-        # Canal 0 : S1 VV (SAR polarisation verticale-verticale)
-        # Canal 1 : S1 VH (SAR polarisation verticale-horizontale)
-        # Canaux 2-4 : S2 Cloudy RGB (Rouge, Vert, Bleu)
-        input_tensor = torch.from_numpy(
-            np.stack([vv, vh, r_cloudy, g_cloudy, b_cloudy], axis=0)
+        return {
+            "condition": condition,  # Input: SAR + cloudy RGB
+            "target": s2_clear,      # Target: clear RGB
+        }
+
+    def split_train_val(self, val_split=0.2):
+        """
+        Split dataset into training and validation sets.
+        
+        Args:
+            val_split (float): Fraction of data to use for validation
+        
+        Returns:
+            tuple: (train_dataset, val_dataset)
+        """
+        val_size = int(len(self) * val_split)
+        train_size = len(self) - val_size
+        
+        return random_split(
+            self,
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(42)  # Reproducible split
         )
-        target_tensor = torch.from_numpy(np.stack([r_clear, g_clear, b_clear], axis=0))
-
-        # Appliquer l'augmentation de manière déterministe selon la variante
-        if self.augment and aug_variant > 0:
-            # Variante 1 ou 3 : flip horizontal
-            if aug_variant in [1, 3]:
-                input_tensor = torch.flip(input_tensor, dims=[2])
-                target_tensor = torch.flip(target_tensor, dims=[2])
-            
-            # Variante 2 ou 3 : flip vertical
-            if aug_variant in [2, 3]:
-                input_tensor = torch.flip(input_tensor, dims=[1])
-                target_tensor = torch.flip(target_tensor, dims=[1])
-
-        patch_id = triplet["id"]
-        
-        # Ajouter suffixe pour identifier la variante d'augmentation
-        if self.augment and aug_variant > 0:
-            aug_suffix = ["", "_fh", "_fv", "_fhv"][aug_variant]
-            patch_id = f"{patch_id}{aug_suffix}"
-            
-        return input_tensor, target_tensor, patch_id
-
-    @staticmethod
-    def normalize_sar_vv(data):
-        """
-        Normalise les données SAR VV (co-pol) vers [-1, 1].
-        
-        Détecte automatiquement si les données sont en dB ou en intensité linéaire.
-        Range typique VV: [-25, 0] dB
-        Adapté pour été (végétation) et hiver (sols nus).
-        """
-        data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-        
-        # Détecter si déjà en dB : majorité des valeurs négatives ou dans range [-40, 5]
-        if np.sum(data < 0) > 0.8 * data.size or (data.min() < 0 and data.max() < 10):
-            # Déjà en dB
-            db = data
-        else:
-            # En intensité linéaire, convertir en dB
-            data = np.maximum(data, 1e-6)
-            db = 10 * np.log10(data)
-        
-        db = np.clip(db, -25, 0)
-        normalized = ((db + 25.0) / 25.0) * 2.0 - 1.0
-        return normalized.astype(np.float32)
-    
-    @staticmethod
-    def normalize_sar_vh(data):
-        """
-        Normalise les données SAR VH (cross-pol) vers [-1, 1].
-        
-        Détecte automatiquement si les données sont en dB ou en intensité linéaire.
-        Range typique VH: [-35, -5] dB (plus faible que VV)
-        Adapté pour été (dépolarisation végétation) et hiver (rugosité sols).
-        """
-        data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-        
-        # Détecter si déjà en dB : majorité des valeurs négatives ou dans range [-50, 5]
-        if np.sum(data < 0) > 0.8 * data.size or (data.min() < 0 and data.max() < 10):
-            # Déjà en dB
-            db = data
-        else:
-            # En intensité linéaire, convertir en dB
-            data = np.maximum(data, 1e-6)
-            db = 10 * np.log10(data)
-        
-        db = np.clip(db, -35, -5)
-        normalized = ((db + 35.0) / 30.0) * 2.0 - 1.0
-        return normalized.astype(np.float32)
-
-    @staticmethod
-    def normalize_optical(data):
-        """
-        Normalise les données optiques vers [-1, 1].
-        
-        Normalisation fixe par 3000 (réflectance typique Sentinel-2).
-        """
-        data = np.nan_to_num(data.astype(np.float32), nan=0.0)
-        data = np.clip(data, 0, 3000)
-        normalized = (data / 3000.0) * 2.0 - 1.0
-        return normalized.astype(np.float32)
 
 
 class Pix2PixTrainer:
     """
-    Trainer pour l'entraînement Pix2Pix.
-
-    Fonctionnalités :
-    - Mixed Precision Training (AMP)
-    - GAN Loss + L1 Loss (lambda=100)
-    - Métriques de validation (PSNR, SSIM)
-    - Sauvegarde checkpoints et résultats
+    Trainer class for Pix2Pix GAN.
+    
+    Implements the complete training loop with:
+    - Adversarial loss (BCEWithLogitsLoss)
+    - L1 reconstruction loss (MAE)
+    - Mixed precision training (AMP)
+    - Validation metrics (PSNR, SSIM)
+    - Checkpoint saving
+    - Visualization of results
     
     Args:
-        generator (nn.Module): Modèle générateur
-        discriminator (nn.Module): Modèle discriminateur
-        train_loader (DataLoader): Loader d'entraînement
-        val_loader (DataLoader): Loader de validation
-        device (torch.device): Device de calcul
-        config (dict): Configuration d'entraînement
+        generator (nn.Module): Generator network
+        discriminator (nn.Module): Discriminator network
+        train_loader (DataLoader): Training data loader
+        val_loader (DataLoader): Validation data loader
+        device (torch.device): Device to use (cuda/cpu)
+        config (dict): Training configuration
     """
 
     def __init__(
@@ -459,335 +464,352 @@ class Pix2PixTrainer:
         self.device = device
         self.config = config
 
+        # Loss functions
+        # BCEWithLogitsLoss includes sigmoid activation for numerical stability
         self.criterion_gan = nn.BCEWithLogitsLoss()
-        self.criterion_l1 = nn.L1Loss()
-        self.lambda_l1 = config.get("lambda_l1", 100)
+        self.criterion_l1 = nn.L1Loss()  # Mean Absolute Error
+        self.lambda_l1 = config["lambda_l1"]  # Weight for L1 loss (default: 100)
 
+        # Optimizers (as per Pix2Pix paper)
+        # beta1=0.5 instead of 0.9 for better GAN stability
         self.optimizer_G = torch.optim.Adam(
-            self.generator.parameters(), lr=config.get("lr", 0.0002), betas=(0.5, 0.999)
+            generator.parameters(), lr=config["lr"], betas=(0.5, 0.999)
         )
         self.optimizer_D = torch.optim.Adam(
-            self.discriminator.parameters(),
-            lr=config.get("lr", 0.0002),
-            betas=(0.5, 0.999),
+            discriminator.parameters(), lr=config["lr"], betas=(0.5, 0.999)
         )
 
+        # Mixed precision training
         self.use_amp = config.get("use_amp", True)
-        self.scaler_G = GradScaler(enabled=self.use_amp)
-        self.scaler_D = GradScaler(enabled=self.use_amp)
+        self.scaler = GradScaler() if self.use_amp else None
 
+        # Tracking
         self.current_epoch = 0
-        self.history = {
-            "loss_G": [],
-            "loss_D": [],
-            "loss_G_gan": [],
-            "loss_G_l1": [],
-            "loss_D_real": [],
-            "loss_D_fake": [],
-            "val_psnr": [],
-            "val_ssim": [],
-        }
+        self.history = {"loss_G": [], "loss_D": []}
 
-        self.save_dir = Path(config.get("save_dir", "checkpoints"))
-        self.save_dir.mkdir(exist_ok=True)
-        self.results_dir = Path(config.get("results_dir", "results"))
-        self.results_dir.mkdir(exist_ok=True)
-
-        print(f"Trainer initialisé")
-        print(f"  Device          : {device}")
-        print(f"  Mixed Precision : {self.use_amp}")
-        print(f"  Lambda L1       : {self.lambda_l1}")
-        print(f"  Learning Rate   : {config.get('lr', 0.0002)}")
+        # Directories
+        self.save_dir = Path(config["save_dir"])
+        self.results_dir = Path(config["results_dir"])
+        self.save_dir.mkdir(exist_ok=True, parents=True)
+        self.results_dir.mkdir(exist_ok=True, parents=True)
 
     def train_epoch(self):
         """
-        Entraîne une époque complète.
+        Train for one epoch.
+        
+        Training procedure (per batch):
+        1. Update Discriminator:
+           - Classify real (condition + target) pairs
+           - Classify fake (condition + generated) pairs
+           - Backpropagate discriminator loss
+        
+        2. Update Generator:
+           - Generate fake images
+           - Fool discriminator (adversarial loss)
+           - Minimize L1 distance to target (reconstruction loss)
+           - Backpropagate combined loss
         
         Returns:
-            dict: Statistiques de l'époque (losses moyennes)
+            dict: Average losses for the epoch
         """
         self.generator.train()
         self.discriminator.train()
 
-        epoch_losses = {
-            "loss_G": 0,
-            "loss_D": 0,
-            "loss_G_gan": 0,
-            "loss_G_l1": 0,
-            "loss_D_real": 0,
-            "loss_D_fake": 0,
-        }
+        # Accumulators for epoch statistics
+        epoch_loss_G = 0.0
+        epoch_loss_G_gan = 0.0
+        epoch_loss_G_l1 = 0.0
+        epoch_loss_D = 0.0
+        epoch_loss_D_real = 0.0
+        epoch_loss_D_fake = 0.0
 
-        pbar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch + 1}")
+        # Progress bar
+        pbar = tqdm(
+            self.train_loader,
+            desc=f"Epoch {self.current_epoch + 1}",
+            leave=False,
+        )
 
-        for i, batch in enumerate(pbar):
-            input_data, target_data, _ = batch
-            input_data = input_data.to(self.device)
-            target_data = target_data.to(self.device)
+        for batch_idx, batch in enumerate(pbar):
+            condition = batch["condition"].to(self.device)  # SAR + cloudy (5, 256, 256)
+            target = batch["target"].to(self.device)        # Clear RGB (3, 256, 256)
+            batch_size = condition.size(0)
 
+            # Real and fake labels
+            real_labels = torch.ones(batch_size, 1, 30, 30).to(self.device)
+            fake_labels = torch.zeros(batch_size, 1, 30, 30).to(self.device)
+
+            # ==================== Train Discriminator ====================
             self.optimizer_D.zero_grad()
 
-            with torch.amp.autocast('cuda', enabled=self.use_amp):
-                fake_output = self.generator(input_data)
+            with autocast(enabled=self.use_amp):
+                # Generate fake images
+                fake_target = self.generator(condition)
 
-                pred_real = self.discriminator(input_data, target_data)
-                loss_D_real = self.criterion_gan(pred_real, torch.ones_like(pred_real))
+                # Real loss: discriminator should classify real pairs as real
+                pred_real = self.discriminator(condition, target)
+                loss_D_real = self.criterion_gan(pred_real, real_labels)
 
-                pred_fake = self.discriminator(input_data, fake_output.detach())
-                loss_D_fake = self.criterion_gan(pred_fake, torch.zeros_like(pred_fake))
+                # Fake loss: discriminator should classify fake pairs as fake
+                pred_fake = self.discriminator(condition, fake_target.detach())
+                loss_D_fake = self.criterion_gan(pred_fake, fake_labels)
 
+                # Total discriminator loss (average of real and fake)
                 loss_D = (loss_D_real + loss_D_fake) * 0.5
 
-            self.scaler_D.scale(loss_D).backward()
-            self.scaler_D.step(self.optimizer_D)
-            self.scaler_D.update()
+            # Backpropagation
+            if self.use_amp:
+                self.scaler.scale(loss_D).backward()
+                self.scaler.step(self.optimizer_D)
+            else:
+                loss_D.backward()
+                self.optimizer_D.step()
 
+            # ==================== Train Generator ====================
             self.optimizer_G.zero_grad()
 
             with autocast(enabled=self.use_amp):
-                fake_output = self.generator(input_data)
+                # Generate fake images
+                fake_target = self.generator(condition)
 
-                pred_fake = self.discriminator(input_data, fake_output)
-                loss_G_gan = self.criterion_gan(pred_fake, torch.ones_like(pred_fake))
+                # GAN loss: generator should fool discriminator
+                pred_fake = self.discriminator(condition, fake_target)
+                loss_G_gan = self.criterion_gan(pred_fake, real_labels)
 
-                loss_G_l1 = self.criterion_l1(fake_output, target_data)
+                # L1 loss: generator should reconstruct target
+                loss_G_l1 = self.criterion_l1(fake_target, target)
 
+                # Combined generator loss
+                # lambda_l1 weights reconstruction vs adversarial loss
                 loss_G = loss_G_gan + self.lambda_l1 * loss_G_l1
 
-            self.scaler_G.scale(loss_G).backward()
-            self.scaler_G.step(self.optimizer_G)
-            self.scaler_G.update()
+            # Backpropagation
+            if self.use_amp:
+                self.scaler.scale(loss_G).backward()
+                self.scaler.step(self.optimizer_G)
+                self.scaler.update()
+            else:
+                loss_G.backward()
+                self.optimizer_G.step()
 
-            epoch_losses["loss_G"] += loss_G.item()
-            epoch_losses["loss_D"] += loss_D.item()
-            epoch_losses["loss_G_gan"] += loss_G_gan.item()
-            epoch_losses["loss_G_l1"] += loss_G_l1.item()
-            epoch_losses["loss_D_real"] += loss_D_real.item()
-            epoch_losses["loss_D_fake"] += loss_D_fake.item()
+            # Accumulate losses
+            epoch_loss_G += loss_G.item()
+            epoch_loss_G_gan += loss_G_gan.item()
+            epoch_loss_G_l1 += loss_G_l1.item()
+            epoch_loss_D += loss_D.item()
+            epoch_loss_D_real += loss_D_real.item()
+            epoch_loss_D_fake += loss_D_fake.item()
 
+            # Update progress bar
             pbar.set_postfix(
                 {
                     "G": f"{loss_G.item():.4f}",
                     "D": f"{loss_D.item():.4f}",
-                    "L1": f"{loss_G_l1.item():.4f}",
                 }
             )
 
+        # Calculate epoch averages
         n_batches = len(self.train_loader)
-        for key in epoch_losses:
-            epoch_losses[key] /= n_batches
-            self.history[key].append(epoch_losses[key])
+        losses = {
+            "loss_G": epoch_loss_G / n_batches,
+            "loss_G_gan": epoch_loss_G_gan / n_batches,
+            "loss_G_l1": epoch_loss_G_l1 / n_batches,
+            "loss_D": epoch_loss_D / n_batches,
+            "loss_D_real": epoch_loss_D_real / n_batches,
+            "loss_D_fake": epoch_loss_D_fake / n_batches,
+        }
 
         self.current_epoch += 1
-        return epoch_losses
+        return losses
 
+    @torch.no_grad()
     def validate(self):
         """
-        Valide le modèle et calcule les métriques.
+        Run validation and calculate metrics.
+        
+        Evaluates the generator on the validation set using:
+        - PSNR: Peak Signal-to-Noise Ratio (measures pixel-level accuracy)
+        - SSIM: Structural Similarity Index (measures perceptual similarity)
         
         Returns:
-            dict: Métriques de validation (PSNR, SSIM)
+            dict: Validation metrics
         """
         self.generator.eval()
-
-        total_psnr = 0
-        total_ssim = 0
+        total_psnr = 0.0
+        total_ssim = 0.0
         n_batches = 0
 
-        with torch.no_grad():
-            for batch in tqdm(
-                self.val_loader, desc="Validation"
-            ):
-                input_data, target_data, _ = batch
-                input_data = input_data.to(self.device)
-                target_data = target_data.to(self.device)
+        for batch in self.val_loader:
+            condition = batch["condition"].to(self.device)
+            target = batch["target"].to(self.device)
 
-                with torch.amp.autocast('cuda', enabled=self.use_amp):
-                    predictions = self.generator(input_data)
+            # Generate predictions
+            fake_target = self.generator(condition)
 
-                psnr = calculate_psnr(predictions, target_data, max_value=2.0)
-                ssim = calculate_ssim(predictions, target_data)
+            # Calculate metrics
+            total_psnr += calculate_psnr(fake_target, target)
+            total_ssim += calculate_ssim(fake_target, target)
+            n_batches += 1
 
-                total_psnr += psnr
-                total_ssim += ssim
-                n_batches += 1
+        # Average metrics
+        metrics = {
+            "psnr": total_psnr / n_batches,
+            "ssim": total_ssim / n_batches,
+        }
 
-        avg_psnr = total_psnr / n_batches
-        avg_ssim = total_ssim / n_batches
+        return metrics
 
-        self.history["val_psnr"].append(avg_psnr)
-        self.history["val_ssim"].append(avg_ssim)
-
-        return {"psnr": avg_psnr, "ssim": avg_ssim}
-    
-    def save_individual_images(self, n_samples=4):
-        """
-        Sauvegarde des images individuelles au format PNG.
-        
-        Conversion correcte : [-1, 1] → [0, 255] pour visualisation.
-        
-        Args:
-            n_samples (int): Nombre d'échantillons à sauvegarder
-        """
-        self.generator.eval()
-        
-        batch = next(iter(self.val_loader))
-        inputs, targets, patch_ids = batch
-        inputs = inputs[:n_samples].to(self.device)
-        targets = targets[:n_samples].to(self.device)
-        patch_ids = patch_ids[:n_samples]
-        
-        with torch.no_grad():
-            predictions = self.generator(inputs)
-        
-        epoch_dir = self.results_dir / f"epoch_{self.current_epoch:03d}_individual"
-        epoch_dir.mkdir(exist_ok=True)
-        
-        for i in range(n_samples):
-            patch_id = patch_ids[i]
-            
-            pred_np = predictions[i].cpu().numpy()
-            pred_np = np.transpose(pred_np, (1, 2, 0))
-            pred_np = ((pred_np + 1) / 2 * 255).astype(np.uint8)
-            
-            target_np = targets[i].cpu().numpy()
-            target_np = np.transpose(target_np, (1, 2, 0))
-            target_np = ((target_np + 1) / 2 * 255).astype(np.uint8)
-            
-            cloudy_np = inputs[i, 2:5].cpu().numpy()
-            cloudy_np = np.transpose(cloudy_np, (1, 2, 0))
-            cloudy_np = ((cloudy_np + 1) / 2 * 255).astype(np.uint8)
-            
-            Image.fromarray(pred_np).save(epoch_dir / f"{patch_id}_generated.png")
-            Image.fromarray(target_np).save(epoch_dir / f"{patch_id}_target.png")
-            Image.fromarray(cloudy_np).save(epoch_dir / f"{patch_id}_input.png")
-        
-        print(f"   Images individuelles sauvegardées : {epoch_dir}")
-        self.generator.train()
-
+    @torch.no_grad()
     def save_validation_results(self, n_samples=4):
         """
-        Sauvegarde planche comparative des résultats de validation.
+        Save a grid of validation results for visual inspection.
         
-        Génère une planche d'images montrant les résultats de validation.
-        Colonnes : [SAR VV | S2 Cloudy | Prédiction | Ground Truth]
+        Creates a comparison grid showing:
+        - Column 1: SAR VV (grayscale, enhanced contrast)
+        - Column 2: Cloudy optical RGB
+        - Column 3: Generated clear RGB
+        - Column 4: Ground truth clear RGB
+        
+        Args:
+            n_samples (int): Number of samples to visualize
         """
         self.generator.eval()
 
+        # Get a batch from validation set
         batch = next(iter(self.val_loader))
-        inputs, targets, patch_ids = batch
-        inputs = inputs[:n_samples].to(self.device)
-        targets = targets[:n_samples].to(self.device)
-        patch_ids = patch_ids[:n_samples]
+        condition = batch["condition"].to(self.device)
+        target = batch["target"].to(self.device)
+        n_samples = min(n_samples, condition.size(0))
 
-        with torch.no_grad():
-            predictions = self.generator(inputs)
+        # Generate predictions
+        fake_target = self.generator(condition[:n_samples])
 
-        def to_numpy_img(tensor):
-            img = tensor.cpu().numpy()
-            img = np.transpose(img, (1, 2, 0))
-            img = (img + 1) / 2
-            return np.clip(img, 0, 1)
-        
-        fig, axes = plt.subplots(n_samples, 4, figsize=(20, 5 * n_samples))
+        # Prepare visualization (denormalize to [0, 1] range)
+        def to_display(tensor):
+            """Convert from [-1, 1] to [0, 1] range and clip."""
+            return torch.clamp((tensor + 1) / 2, 0, 1)
+
+        # Create figure
+        fig, axes = plt.subplots(n_samples, 4, figsize=(16, 4 * n_samples))
         if n_samples == 1:
             axes = axes[np.newaxis, :]
 
         for i in range(n_samples):
-            patch_id = patch_ids[i]
-            
-            # Colonne 1 : SAR VV normalisé ([-1,1] → [0,1])
-            sar_vv = (inputs[i, 0].cpu().numpy() + 1) / 2
-            axes[i, 0].imshow(sar_vv, cmap="gray", vmin=0, vmax=1)
-            axes[i, 0].set_title(f"SAR VV - {patch_id}", fontsize=10)
+            # SAR VV channel (enhanced contrast for visibility)
+            sar_vv = condition[i, 0].cpu().numpy()
+            sar_display = np.clip((sar_vv - sar_vv.min()) / (sar_vv.max() - sar_vv.min() + 1e-6), 0, 1)
+            axes[i, 0].imshow(sar_display, cmap='gray')
+            axes[i, 0].set_title("SAR VV (Enhanced)")
             axes[i, 0].axis("off")
 
-            # Colonne 2 : S2 Cloudy (Input RGB)
-            cloudy = to_numpy_img(inputs[i, 2:5])
-            axes[i, 1].imshow(cloudy)
-            axes[i, 1].set_title("S2 Cloudy (Input)", fontsize=10)
+            # Cloudy optical RGB
+            cloudy_rgb = to_display(condition[i, 2:5]).permute(1, 2, 0).cpu().numpy()
+            axes[i, 1].imshow(cloudy_rgb)
+            axes[i, 1].set_title("Cloudy Optical")
             axes[i, 1].axis("off")
 
-            # Colonne 3 : Prédiction du modèle
-            pred = to_numpy_img(predictions[i])
-            axes[i, 2].imshow(pred)
-            axes[i, 2].set_title("Prédiction IA", fontsize=10)
+            # Generated clear RGB
+            generated = to_display(fake_target[i]).permute(1, 2, 0).cpu().numpy()
+            axes[i, 2].imshow(generated)
+            axes[i, 2].set_title("Generated Clear")
             axes[i, 2].axis("off")
 
-            # Colonne 4 : Ground Truth (S2 Clear)
-            target = to_numpy_img(targets[i])
-            axes[i, 3].imshow(target)
-            axes[i, 3].set_title("Ground Truth (S2 Clear)", fontsize=10)
+            # Ground truth clear RGB
+            ground_truth = to_display(target[i]).permute(1, 2, 0).cpu().numpy()
+            axes[i, 3].imshow(ground_truth)
+            axes[i, 3].set_title("Ground Truth")
             axes[i, 3].axis("off")
 
+        plt.suptitle(
+            f"Validation Results - Epoch {self.current_epoch}",
+            fontsize=16,
+            fontweight="bold",
+        )
         plt.tight_layout()
 
+        # Save figure
         save_path = self.results_dir / f"epoch_{self.current_epoch:03d}_validation.png"
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close()
 
         print(f"   Validation results saved: {save_path}")
 
-        self.generator.train()
-
-    def visualize_results(self, n_samples=3):
-        """Visualize predictions from training set."""
+    @torch.no_grad()
+    def save_individual_images(self, n_samples=4):
+        """
+        Save individual validation images for detailed inspection.
+        
+        Creates separate PNG files for each sample containing:
+        - SAR channels (VV, VH)
+        - Cloudy optical RGB
+        - Generated clear RGB
+        - Ground truth clear RGB
+        
+        Args:
+            n_samples (int): Number of samples to save
+        """
         self.generator.eval()
 
-        batch = next(iter(self.train_loader))
-        inputs, targets, patch_ids = batch
-        inputs = inputs[:n_samples].to(self.device)
-        targets = targets[:n_samples].to(self.device)
-        patch_ids = patch_ids[:n_samples]
+        # Get a batch from validation set
+        batch = next(iter(self.val_loader))
+        condition = batch["condition"].to(self.device)
+        target = batch["target"].to(self.device)
+        n_samples = min(n_samples, condition.size(0))
 
-        with torch.no_grad():
-            predictions = self.generator(inputs)
+        # Generate predictions
+        fake_target = self.generator(condition[:n_samples])
 
-        def to_numpy_img(tensor):
-            img = tensor.cpu().numpy()
-            img = np.transpose(img, (1, 2, 0))
-            img = (img + 1) / 2
-            return np.clip(img, 0, 1)
+        # Denormalization function
+        def to_display(tensor):
+            """Convert from [-1, 1] to [0, 255] range for saving."""
+            return torch.clamp((tensor + 1) / 2 * 255, 0, 255).byte()
 
-        fig, axes = plt.subplots(n_samples, 4, figsize=(16, 4 * n_samples))
-        if n_samples == 1:
-            axes = axes[np.newaxis, :]
+        # Create sample directory
+        sample_dir = self.results_dir / f"epoch_{self.current_epoch:03d}_samples"
+        sample_dir.mkdir(exist_ok=True, parents=True)
 
         for i in range(n_samples):
-            patch_id = patch_ids[i]
-            
-            sar_vv = (inputs[i, 0].cpu().numpy() + 1) / 2
-            axes[i, 0].imshow(sar_vv, cmap="gray")
-            axes[i, 0].set_title(f"SAR VV - {patch_id}")
-            axes[i, 0].axis("off")
+            sample_subdir = sample_dir / f"sample_{i:02d}"
+            sample_subdir.mkdir(exist_ok=True, parents=True)
 
-            cloudy = to_numpy_img(inputs[i, 2:5])
-            axes[i, 1].imshow(cloudy)
-            axes[i, 1].set_title("S2 Cloudy (Input)")
-            axes[i, 1].axis("off")
+            # SAR VV channel
+            sar_vv = condition[i, 0].cpu().numpy()
+            sar_vv_display = np.clip((sar_vv - sar_vv.min()) / (sar_vv.max() - sar_vv.min() + 1e-6) * 255, 0, 255).astype(np.uint8)
+            Image.fromarray(sar_vv_display).save(sample_subdir / "sar_vv.png")
 
-            pred = to_numpy_img(predictions[i])
-            axes[i, 2].imshow(pred)
-            axes[i, 2].set_title("Prediction (Generated)")
-            axes[i, 2].axis("off")
+            # SAR VH channel
+            sar_vh = condition[i, 1].cpu().numpy()
+            sar_vh_display = np.clip((sar_vh - sar_vh.min()) / (sar_vh.max() - sar_vh.min() + 1e-6) * 255, 0, 255).astype(np.uint8)
+            Image.fromarray(sar_vh_display).save(sample_subdir / "sar_vh.png")
 
-            target = to_numpy_img(targets[i])
-            axes[i, 3].imshow(target)
-            axes[i, 3].set_title("Ground Truth (S2 Clear)")
-            axes[i, 3].axis("off")
+            # Cloudy optical RGB
+            cloudy_rgb = to_display(condition[i, 2:5]).permute(1, 2, 0).cpu().numpy()
+            Image.fromarray(cloudy_rgb).save(sample_subdir / "cloudy_optical.png")
 
-        plt.tight_layout()
+            # Generated clear RGB
+            generated = to_display(fake_target[i]).permute(1, 2, 0).cpu().numpy()
+            Image.fromarray(generated).save(sample_subdir / "generated_clear.png")
 
-        save_path = self.save_dir / f"epoch_{self.current_epoch:03d}_results.png"
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        plt.close()
+            # Ground truth clear RGB
+            ground_truth = to_display(target[i]).permute(1, 2, 0).cpu().numpy()
+            Image.fromarray(ground_truth).save(sample_subdir / "ground_truth.png")
 
-        print(f"   Visualization saved: {save_path}")
-
-        self.generator.train()
+        print(f"   Individual images saved: {sample_dir}")
 
     def save_checkpoint(self, filename=None):
-        """Save model checkpoint."""
+        """
+        Save model checkpoint.
+        
+        Saves:
+        - Generator and discriminator state dicts
+        - Optimizer state dicts
+        - Current epoch
+        - Training history
+        - Configuration
+        
+        Args:
+            filename (str, optional): Checkpoint filename (auto-generated if None)
+        """
         if filename is None:
             filename = f"checkpoint_epoch_{self.current_epoch:03d}.pth"
 
@@ -806,7 +828,18 @@ class Pix2PixTrainer:
         print(f"   Checkpoint saved: {save_path}")
 
     def load_checkpoint(self, checkpoint_path):
-        """Load model checkpoint."""
+        """
+        Load model checkpoint.
+        
+        Restores:
+        - Generator and discriminator weights
+        - Optimizer states
+        - Training progress
+        - History
+        
+        Args:
+            checkpoint_path (str): Path to checkpoint file
+        """
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
 
         self.generator.load_state_dict(checkpoint["generator_state_dict"])
@@ -821,10 +854,16 @@ class Pix2PixTrainer:
     @staticmethod
     def init_training_log(log_path):
         """
-        Initialise le fichier CSV de logging des métriques.
+        Initialize CSV file for logging training metrics.
+        
+        Creates a CSV file with headers for tracking:
+        - Epoch number
+        - Generator losses (total, GAN, L1)
+        - Discriminator losses (total, real, fake)
+        - Validation metrics (PSNR, SSIM)
         
         Args:
-            log_path (Path): Chemin vers le fichier CSV
+            log_path (Path): Path to CSV file
         """
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, 'w') as f:
@@ -833,12 +872,15 @@ class Pix2PixTrainer:
 
     def log_metrics(self, log_path, losses, metrics):
         """
-        Enregistre les métriques dans le CSV de suivi.
+        Log training metrics to CSV file.
+        
+        Appends a row to the training log with current epoch's metrics.
+        Useful for tracking convergence and creating training curves.
         
         Args:
-            log_path (Path): Chemin vers le fichier CSV
-            losses (dict): Dictionnaire des losses d'entraînement
-            metrics (dict): Dictionnaire des métriques de validation (PSNR, SSIM)
+            log_path (Path): Path to CSV file
+            losses (dict): Training losses for the epoch
+            metrics (dict): Validation metrics (PSNR, SSIM)
         """
         with open(log_path, 'a') as f:
             f.write(f"{self.current_epoch},"
@@ -853,25 +895,48 @@ class Pix2PixTrainer:
 
 
 def main():
-    """Main training script with validation and metrics."""
+    """
+    Main training script with validation and metrics.
+    
+    Workflow:
+    1. Load dataset (from CSV or auto-discover)
+    2. Split into train/validation sets
+    3. Initialize generator and discriminator
+    4. Train for specified number of epochs
+    5. Save checkpoints and validation results
+    6. Log metrics to CSV for analysis
+    
+    Configuration can be modified in the config dictionary below.
+    """
 
+    # ==================== Configuration ====================
     config = {
+        # Dataset settings
         "data_folder": "data/sen_1_2",
-        "dataset_mode": "csv",
+        "dataset_mode": "csv",  # 'csv' or 'auto'
         "csv_file": "data/sen_1_2/cleaned_triplets.csv",
-        "batch_size": 48,
-        "num_epochs": 200,
-        "lr": 0.0002,
-        "lambda_l1": 100,
-        "use_amp": True,
+        
+        # Training hyperparameters
+        "batch_size": 48,          # Optimized for RTX 3080 (10GB VRAM)
+        "num_epochs": 200,         # Typical: 100-200 epochs for convergence
+        "lr": 0.0002,              # Learning rate (as per Pix2Pix paper)
+        "lambda_l1": 100,          # L1 loss weight (higher = more reconstruction focus)
+        
+        # Optimization
+        "use_amp": True,           # Mixed precision training (faster, less memory)
+        
+        # Directories
         "save_dir": "checkpoints",
         "results_dir": "results",
-        "val_split": 0.15,
-        "val_freq": 2,
-        "save_freq": 10,
-        "save_individual": True,
+        
+        # Validation and saving
+        "val_split": 0.15,         # 15% of data for validation
+        "val_freq": 2,             # Validate every N epochs
+        "save_freq": 10,           # Save checkpoint every N epochs
+        "save_individual": True,   # Save individual validation images
     }
 
+    # ==================== Device Setup ====================
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n" + "=" * 60)
     print(f"PIX2PIX TRAINING: SAR to Optical (Cloud Removal)")
@@ -883,18 +948,22 @@ def main():
         print(f"  VRAM            : {vram_gb:.2f} GB")
     print("=" * 60 + "\n")
 
+    # ==================== Dataset Loading ====================
     if config["dataset_mode"] == "auto":
+        # Auto-discover all available triplets
         full_dataset = SEN12Dataset(
             data_folder=config["data_folder"],
             mode="auto"
         )
     else:
+        # Load from CSV (recommended for cleaned datasets)
         full_dataset = SEN12Dataset(
             data_folder=config["data_folder"],
             csv_file=config["csv_file"],
             mode="csv"
         )
 
+    # Split into train/validation sets
     train_dataset, val_dataset = full_dataset.split_train_val(
         val_split=config["val_split"]
     )
@@ -909,13 +978,14 @@ def main():
     print(f"  Mode            : {config['dataset_mode']}")
     print(f"{'='*60}\n")
 
+    # ==================== Data Loaders ====================
     train_loader = DataLoader(
         train_dataset,
         batch_size=config["batch_size"],
         shuffle=True,
-        num_workers=8,
-        pin_memory=True,
-        persistent_workers=True,
+        num_workers=8,           # Parallel data loading
+        pin_memory=True,         # Faster GPU transfer
+        persistent_workers=True, # Keep workers alive between epochs
     )
 
     val_loader = DataLoader(
@@ -931,6 +1001,7 @@ def main():
     print(f"  Train batches   : {len(train_loader)}")
     print(f"  Val batches     : {len(val_loader)}\n")
 
+    # ==================== Model Initialization ====================
     generator = UNetGenerator(in_channels=5, out_channels=3)
     discriminator = PatchGANDiscriminator(in_channels=8)
 
@@ -939,14 +1010,16 @@ def main():
     print(f"  Generator       : {gen_params:,} parameters")
     print(f"  Discriminator   : {disc_params:,} parameters\n")
 
+    # ==================== Trainer Initialization ====================
     trainer = Pix2PixTrainer(
         generator, discriminator, train_loader, val_loader, device, config
     )
 
-    # Initialiser le fichier CSV de logging
+    # Initialize training log CSV
     log_path = Path(config["results_dir"]) / "training_log.csv"
     Pix2PixTrainer.init_training_log(log_path)
 
+    # ==================== Training Loop ====================
     print("=" * 60)
     print("TRAINING START")
     print("=" * 60 + "\n")
@@ -955,8 +1028,10 @@ def main():
 
     try:
         for epoch in range(config["num_epochs"]):
+            # Train for one epoch
             losses = trainer.train_epoch()
 
+            # Display training losses
             print(f"\nEpoch {epoch + 1}/{config['num_epochs']}:")
             print(
                 f"   Loss G: {losses['loss_G']:.4f} "
@@ -967,6 +1042,7 @@ def main():
                 + f"(Real: {losses['loss_D_real']:.4f}, Fake: {losses['loss_D_fake']:.4f})"
             )
 
+            # Validation and visualization
             if (epoch + 1) % config["val_freq"] == 0:
                 metrics = trainer.validate()
                 print(
@@ -974,24 +1050,29 @@ def main():
                 )
                 trainer.save_validation_results(n_samples=4)
                 
-                # Logger les métriques dans le CSV
+                # Log metrics to CSV
                 trainer.log_metrics(log_path, losses, metrics)
                 
+                # Save individual images for detailed inspection
                 if config.get("save_individual", True):
                     trainer.save_individual_images(n_samples=4)
             else:
-                # Logger uniquement les losses (sans validation)
+                # Log only losses (without validation)
                 trainer.log_metrics(log_path, losses, {})
 
+            # Save checkpoint
             if (epoch + 1) % config["save_freq"] == 0:
                 trainer.save_checkpoint()
 
+        # Save final model
         trainer.save_checkpoint("final_model.pth")
 
     except KeyboardInterrupt:
+        # Handle manual interruption (Ctrl+C)
         print("\n\nTraining interrupted by user")
         trainer.save_checkpoint("interrupted_model.pth")
 
+    # ==================== Training Complete ====================
     elapsed_time = time.time() - start_time
     print(f"\n" + "=" * 60)
     print(f"TRAINING COMPLETE")

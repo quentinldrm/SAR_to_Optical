@@ -1,14 +1,14 @@
 """
-Script de nettoyage du dataset SEN12 Multisaison
+SEN12 Multi-season Dataset Cleaning Script
 
-Filtre les images corrompues ou sans contenu significatif.
-Critères de validation AJUSTÉS :
-- SAR : écart-type > 0.0001 et valeur max > 0.001 (élimine océans/corruption)
-- Optique : écart-type moyen RGB > 3.0 (abaissé pour supporter Winter)
+Filters out corrupted images or those without significant content.
+ADJUSTED Validation Criteria:
+- SAR: standard deviation > 0.0001 and max value > 0.001 (removes oceans/corrupted files)
+- Optical: mean RGB standard deviation > 3.0 (lowered to support Winter conditions)
 
-Modes de fonctionnement :
-- Mode 1 : Nettoyer un CSV existant
-- Mode 2 : Scanner tous les dossiers et créer un CSV nettoyé (RECOMMANDÉ)
+Operating Modes:
+- Mode 1: Clean an existing CSV
+- Mode 2: Scan all directories and create a cleaned CSV (RECOMMENDED)
 """
 
 import rasterio
@@ -21,34 +21,35 @@ from tqdm import tqdm
 
 def discover_all_triplets(data_root):
     """
-    Découvre tous les triplets disponibles dans le dataset.
-    
-    Chaque triplet est composé de :
-    - S1 : Image SAR (Sentinel-1)
-    - S2 : Image optique claire (Sentinel-2)
-    - S2_cloudy : Image optique nuageuse (Sentinel-2)
-    
+    Scans the directory structure to identify available triplets.
+
+    Each triplet consists of:
+    - S1: SAR Image (Sentinel-1)
+    - S2: Clear optical image (Sentinel-2)
+    - S2_cloudy: Cloudy optical image (Sentinel-2)
+
     Args:
-        data_root (str): Chemin racine du dataset
-        
+        data_root (str): Root path of the dataset
+
     Returns:
-        list: Liste de dictionnaires contenant les informations de chaque triplet
+        list: List of dictionaries containing file paths for each triplet
     """
     data_root = Path(data_root)
-    
-    # Chercher TOUS les dossiers qui matchent les patterns (summer, winter, etc.)
+
+    # Search for ALL folders matching seasonal patterns (summer, winter, etc.)
     s1_folders = list(data_root.glob("ROIs*_s1"))
     s2_folders = list(data_root.glob("ROIs*_s2"))
     s2_cloudy_folders = list(data_root.glob("ROIs*_s2_cloudy"))
-    
-    print("Découverte des triplets disponibles...")
-    print(f"  Dossiers S1         : {len(s1_folders)} trouvés")
-    print(f"  Dossiers S2         : {len(s2_folders)} trouvés")
-    print(f"  Dossiers S2 Cloudy  : {len(s2_cloudy_folders)} trouvés")
+
+    print("Discovering available triplets...")
+    print(f"  S1 Folders         : {len(s1_folders)} found")
+    print(f"  S2 Folders         : {len(s2_folders)} found")
+    print(f"  S2 Cloudy Folders  : {len(s2_cloudy_folders)} found")
     for folder in s1_folders + s2_folders + s2_cloudy_folders:
         print(f"    - {folder.name}")
     print()
-    
+
+    # Map S1 files: key = {season}_{patch_id}
     s1_files = {}
     for s1_folder in s1_folders:
         if s1_folder.exists():
@@ -56,15 +57,18 @@ def discover_all_triplets(data_root):
                 if parent_folder.is_dir():
                     for tif_file in parent_folder.glob("*.tif"):
                         filename = tif_file.stem
-                        # Extraire le patch_id de manière flexible
                         if "_s1_" in filename:
                             patch_id = filename.split("_s1_")[-1]
-                            # Ajouter le nom de la saison au patch_id pour éviter les doublons
-                            season = s1_folder.name.split("_")[1]  # 'summer' ou 'winter'
+                            season = s1_folder.name.split("_")[1]
                             full_patch_id = f"{season}_{patch_id}"
-                            s1_files[full_patch_id] = (s1_folder.name, parent_folder.name, tif_file.name)
-    print(f"  S1         : {len(s1_files)} fichiers uniques")
-    
+                            s1_files[full_patch_id] = (
+                                s1_folder.name,
+                                parent_folder.name,
+                                tif_file.name,
+                            )
+    print(f"  S1 unique files    : {len(s1_files)}")
+
+    # Map S2 (Clear) files
     s2_files = {}
     for s2_folder in s2_folders:
         if s2_folder.exists():
@@ -76,9 +80,14 @@ def discover_all_triplets(data_root):
                             patch_id = filename.split("_s2_")[-1]
                             season = s2_folder.name.split("_")[1]
                             full_patch_id = f"{season}_{patch_id}"
-                            s2_files[full_patch_id] = (s2_folder.name, parent_folder.name, tif_file.name)
-    print(f"  S2         : {len(s2_files)} fichiers uniques")
-    
+                            s2_files[full_patch_id] = (
+                                s2_folder.name,
+                                parent_folder.name,
+                                tif_file.name,
+                            )
+    print(f"  S2 unique files    : {len(s2_files)}")
+
+    # Map S2 (Cloudy) files
     s2_cloudy_files = {}
     for s2_cloudy_folder in s2_cloudy_folders:
         if s2_cloudy_folder.exists():
@@ -90,236 +99,219 @@ def discover_all_triplets(data_root):
                             patch_id = filename.split("_s2_cloudy_")[-1]
                             season = s2_cloudy_folder.name.split("_")[1]
                             full_patch_id = f"{season}_{patch_id}"
-                            s2_cloudy_files[full_patch_id] = (s2_cloudy_folder.name, parent_folder.name, tif_file.name)
-    print(f"  S2 Cloudy  : {len(s2_cloudy_files)} fichiers uniques")
-    
+                            s2_cloudy_files[full_patch_id] = (
+                                s2_cloudy_folder.name,
+                                parent_folder.name,
+                                tif_file.name,
+                            )
+    print(f"  S2 Cloudy files    : {len(s2_cloudy_files)}")
+
+    # Find the intersection of all sets to ensure we have complete triplets
     s1_ids = set(s1_files.keys())
     s2_ids = set(s2_files.keys())
     s2_cloudy_ids = set(s2_cloudy_files.keys())
-    
+
     complete_ids = s1_ids & s2_ids & s2_cloudy_ids
-    
-    print(f"\n  Triplets complets : {len(complete_ids)}")
-    
-    # Statistiques par saison
+
+    print(f"\n  Complete Triplets  : {len(complete_ids)}")
+
+    # Breakdown stats by season
     seasons = {}
     for patch_id in complete_ids:
         season = patch_id.split("_")[0]
         seasons[season] = seasons.get(season, 0) + 1
-    
+
     for season, count in sorted(seasons.items()):
         print(f"    - {season.capitalize()}: {count} triplets")
-    
-    if len(complete_ids) > 0 and len(complete_ids) < 10:
+
+    if 0 < len(complete_ids) < 10:
         samples = sorted(list(complete_ids))[:5]
-        print(f"  Exemples          : {samples}")
+        print(f"  Samples            : {samples}")
     print()
-    
+
     triplets = []
     for patch_id in sorted(complete_ids):
         s1_root, s1_parent, s1_file = s1_files[patch_id]
         s2_root, s2_parent, s2_file = s2_files[patch_id]
         s2_cloudy_root, s2_cloudy_parent, s2_cloudy_file = s2_cloudy_files[patch_id]
-        
-        triplets.append({
-            'id': patch_id,
-            's1_root_folder': s1_root,
-            's1_folder': s1_parent,
-            's1_file': s1_file,
-            's2_root_folder': s2_root,
-            's2_folder': s2_parent,
-            's2_file': s2_file,
-            's2_cloudy_root_folder': s2_cloudy_root,
-            's2_cloudy_folder': s2_cloudy_parent,
-            's2_cloudy_file': s2_cloudy_file
-        })
-    
+
+        triplets.append(
+            {
+                "id": patch_id,
+                "s1_root_folder": s1_root,
+                "s1_folder": s1_parent,
+                "s1_file": s1_file,
+                "s2_root_folder": s2_root,
+                "s2_folder": s2_parent,
+                "s2_file": s2_file,
+                "s2_cloudy_root_folder": s2_cloudy_root,
+                "s2_cloudy_folder": s2_cloudy_parent,
+                "s2_cloudy_file": s2_cloudy_file,
+            }
+        )
+
     return triplets
 
 
 def validate_triplet(row, data_root):
     """
-    Valide un triplet selon les critères de qualité.
-    
-    Critères AJUSTÉS pour multisaison :
-    - SAR : écart-type > 0.0001 et max > 0.001 (élimine océans/corruption)
-    - Optique : écart-type moyen RGB > 3.0 (abaissé de 10.0 pour Winter)
-    
-    Args:
-        row (dict): Informations du triplet
-        data_root (str): Chemin racine du dataset
-        
-    Returns:
-        bool: True si le triplet est valide, False sinon
+    Validates a triplet based on quality criteria.
+
+    Adjusted thresholds:
+    - SAR: checks for non-zero variance and signal presence (removes empty/ocean patches).
+    - Optical: ensures enough texture/contrast. Threshold is lower for Winter to avoid
+      rejecting snowy but valid landscapes.
     """
-    # Support du nouveau format (avec root_folders) et de l'ancien format
-    s1_root = row.get('s1_root_folder', 'ROIs1868_summer_s1')
-    s2_root = row.get('s2_root_folder', 'ROIs1868_summer_s2')
-    
-    s1_path = os.path.join(data_root, s1_root, row['s1_folder'], row['s1_file'])
-    s2_path = os.path.join(data_root, s2_root, row['s2_folder'], row['s2_file'])
-    
+    # Fallback for old CSV formats without root_folder columns
+    s1_root = row.get("s1_root_folder", "ROIs1868_summer_s1")
+    s2_root = row.get("s2_root_folder", "ROIs1868_summer_s2")
+
+    s1_path = os.path.join(data_root, s1_root, row["s1_folder"], row["s1_file"])
+    s2_path = os.path.join(data_root, s2_root, row["s2_folder"], row["s2_file"])
+
     try:
         with rasterio.open(s1_path) as src:
             s1_data = src.read(1)
         with rasterio.open(s2_path) as src:
+            # Reads RGB bands (adjust indices if your TIF structure differs)
             s2_data = src.read([2, 3, 4])
 
-        # Validation SAR (inchangée)
+        # SAR Validation (Unchanged)
         if s1_data.std() < 0.0001 or s1_data.max() < 0.001:
             return False
 
-        # Validation Optique : seuil différencié selon la saison
-
+        # Optical Validation: Threshold varies by season
         optical_std = np.mean([s2_data[i].std() for i in range(3)])
-        # Détection de la saison
-        season = row.get('id', '').split('_')[0].lower()
-        print(f"[VALIDATION] Saison: {season}, optical_std: {optical_std:.2f}")
-        if season == 'winter':
+        season = row.get("id", "").split("_")[0].lower()
+
+        print(f"[VALIDATION] Season: {season}, optical_std: {optical_std:.2f}")
+
+        if season == "winter":
             if optical_std < 2.0:
-                print("  -> Rejeté (Winter, optical_std < 2.0)")
+                print("  -> Rejected (Winter, optical_std < 2.0)")
                 return False
         else:
             if optical_std < 3.0:
-                print("  -> Rejeté (Summer, optical_std < 3.0)")
+                print("  -> Rejected (Summer/Other, optical_std < 3.0)")
                 return False
 
         return True
 
-    except Exception as e:
+    except Exception:
         return False
 
 
 def clean_dataset_from_csv(csv_input, csv_output, data_root):
     """
-    Nettoie un CSV existant en validant chaque triplet.
-    
-    Args:
-        csv_input (str): Chemin du CSV d'entrée
-        csv_output (str): Chemin du CSV de sortie
-        data_root (str): Chemin racine du dataset
+    Cleans an existing CSV by validating each triplet entry.
     """
     df = pd.read_csv(csv_input)
-    
-    print(f"Validation de {len(df)} triplets...")
-    valid_rows = []
 
+    print(f"Validating {len(df)} triplets...")
+    valid_rows = []
     optical_std_stats = []
-    for idx, row in tqdm(df.iterrows(), total=len(df), desc="Validation"):
+
+    for idx, row in tqdm(df.iterrows(), total=len(df), desc="Validating"):
         triplet = {
-            'id': row['id'],
-            's1_folder': row.get('s1_folder', row.get('s1')),
-            's1_file': row['s1_file'],
-            's2_folder': row.get('s2_folder', row.get('s2')),
-            's2_file': row['s2_file'],
-            's2_cloudy_folder': row.get('s2_cloudy_folder', row.get('s2_cloudy')),
-            's2_cloudy_file': row['s2_cloudy_file'],
-            's1_root_folder': row.get('s1_root_folder', 'ROIs1868_summer_s1'),
-            's2_root_folder': row.get('s2_root_folder', 'ROIs1868_summer_s2'),
+            "id": row["id"],
+            "s1_folder": row.get("s1_folder", row.get("s1")),
+            "s1_file": row["s1_file"],
+            "s2_folder": row.get("s2_folder", row.get("s2")),
+            "s2_file": row["s2_file"],
+            "s2_cloudy_folder": row.get("s2_cloudy_folder", row.get("s2_cloudy")),
+            "s2_cloudy_file": row["s2_cloudy_file"],
+            "s1_root_folder": row.get("s1_root_folder", "ROIs1868_summer_s1"),
+            "s2_root_folder": row.get("s2_root_folder", "ROIs1868_summer_s2"),
         }
-        # Collecte optical_std pour Winter
-        season = triplet['id'].split('_')[0].lower()
-        if season == 'winter':
+
+        # Specific stats collection for Winter data analysis
+        season = triplet["id"].split("_")[0].lower()
+        if season == "winter":
             try:
-                s2_path = os.path.join(data_root, triplet['s2_root_folder'], triplet['s2_folder'], triplet['s2_file'])
+                s2_path = os.path.join(
+                    data_root,
+                    triplet["s2_root_folder"],
+                    triplet["s2_folder"],
+                    triplet["s2_file"],
+                )
                 with rasterio.open(s2_path) as src:
                     s2_data = src.read([2, 3, 4])
                 optical_std = np.mean([s2_data[i].std() for i in range(3)])
-                optical_std_stats.append({'id': triplet['id'], 'optical_std': optical_std})
+                optical_std_stats.append(
+                    {"id": triplet["id"], "optical_std": optical_std}
+                )
             except Exception:
-                optical_std_stats.append({'id': triplet['id'], 'optical_std': None})
+                optical_std_stats.append({"id": triplet["id"], "optical_std": None})
+
         if validate_triplet(triplet, data_root):
             valid_rows.append(triplet)
-    # Export CSV temporaire pour analyse
-    pd.DataFrame(optical_std_stats).to_csv('winter_optical_std_stats.csv', index=False)
+
+    # Export temporary stats for fine-tuning thresholds
+    pd.DataFrame(optical_std_stats).to_csv("winter_optical_std_stats.csv", index=False)
 
     new_df = pd.DataFrame(valid_rows)
     new_df.to_csv(csv_output, index=False, header=True)
-    
+
     print(f"\n{'='*60}")
-    print(f"Triplets valides   : {len(new_df)}/{len(df)} ({len(new_df)/len(df)*100:.1f}%)")
-    print(f"Fichier sauvegardé : {csv_output}")
+    print(
+        f"Valid Triplets     : {len(new_df)}/{len(df)} ({len(new_df)/len(df)*100:.1f}%)"
+    )
+    print(f"File Saved         : {csv_output}")
     print(f"{'='*60}")
 
 
 def clean_dataset_full_scan(csv_output, data_root):
     """
-    Scanne tous les dossiers, trouve les triplets et les valide.
-    
-    Args:
-        csv_output (str): Chemin du CSV de sortie
-        data_root (str): Chemin racine du dataset
+    Scans all directories, identifies triplets, and runs validation.
     """
     all_triplets = discover_all_triplets(data_root)
-    
+
     if len(all_triplets) == 0:
-        print("Aucun triplet trouvé. Vérifiez la structure du dataset.")
+        print("No triplets found. Please check your dataset directory structure.")
         return
-    
-    print(f"Validation de {len(all_triplets)} triplets...")
+
+    print(f"Validating {len(all_triplets)} triplets...")
     valid_rows = []
-    optical_std_stats = []
-    sar_stats = []
-    for triplet in tqdm(all_triplets, desc="Validation"):
-        # Collecte optical_std pour Winter
-        season = triplet['id'].split('_')[0].lower()
-        if season == 'winter':
-            try:
-                s2_path = os.path.join(data_root, triplet['s2_root_folder'], triplet['s2_folder'], triplet['s2_file'])
-                with rasterio.open(s2_path) as src:
-                    s2_data = src.read([2, 3, 4])
-                optical_std = np.mean([s2_data[i].std() for i in range(3)])
-                optical_std_stats.append({'id': triplet['id'], 'optical_std': optical_std})
-            except Exception:
-                optical_std_stats.append({'id': triplet['id'], 'optical_std': None})
-            # Ajout stats SAR
-            try:
-                s1_path = os.path.join(data_root, triplet['s1_root_folder'], triplet['s1_folder'], triplet['s1_file'])
-                with rasterio.open(s1_path) as src:
-                    s1_data = src.read(1)
-                sar_min = float(np.min(s1_data))
-                sar_max = float(np.max(s1_data))
-                sar_std = float(np.std(s1_data))
-                sar_stats.append({'id': triplet['id'], 'sar_min': sar_min, 'sar_max': sar_max, 'sar_std': sar_std})
-            except Exception:
-                sar_stats.append({'id': triplet['id'], 'sar_min': None, 'sar_max': None, 'sar_std': None})
+
+    for triplet in tqdm(all_triplets, desc="Validating"):
+        # We perform the validation check here
         if validate_triplet(triplet, data_root):
             valid_rows.append(triplet)
 
-
+    # Convert results to DataFrame and save
     new_df = pd.DataFrame(valid_rows)
-    csv_data = []
-    for _, row in new_df.iterrows():
-        csv_data.append([
-            row['id'],
-            row['s1_root_folder'],
-            row['s1_folder'],
-            row['s1_file'],
-            row['s2_root_folder'],
-            row['s2_folder'],
-            row['s2_file'],
-            row['s2_cloudy_root_folder'],
-            row['s2_cloudy_folder'],
-            row['s2_cloudy_file']
-        ])
+    columns_order = [
+        "id",
+        "s1_root_folder",
+        "s1_folder",
+        "s1_file",
+        "s2_root_folder",
+        "s2_folder",
+        "s2_file",
+        "s2_cloudy_root_folder",
+        "s2_cloudy_folder",
+        "s2_cloudy_file",
+    ]
 
-    csv_df = pd.DataFrame(csv_data, columns=[
-        'id', 
-        's1_root_folder', 's1_folder', 's1_file', 
-        's2_root_folder', 's2_folder', 's2_file', 
-        's2_cloudy_root_folder', 's2_cloudy_folder', 's2_cloudy_file'
-    ])
-    csv_df.to_csv(csv_output, index=False, header=True)
+    if not new_df.empty:
+        new_df = new_df[columns_order]
+        new_df.to_csv(csv_output, index=False, header=True)
 
     print(f"\n{'='*60}")
-    print(f"Triplets valides   : {len(valid_rows)}/{len(all_triplets)} ({len(valid_rows)/len(all_triplets)*100:.1f}%)")
-    print(f"Fichier sauvegardé : {csv_output}")
+    print(
+        f"Valid Triplets     : {len(valid_rows)}/{len(all_triplets)} ({len(valid_rows)/len(all_triplets)*100:.1f}%)"
+    )
+    print(f"File Saved         : {csv_output}")
     print(f"{'='*60}")
 
 
 if __name__ == "__main__":
-    print("="*60)
-    print("NETTOYAGE DU DATASET SEN12")
-    print("="*60 + "\n")
-    
-    clean_dataset_full_scan('data/sen_1_2/cleaned_triplets.csv', 'data/sen_1_2/')
+    print("=" * 60)
+    print("SEN12 DATASET CLEANING")
+    print("=" * 60 + "\n")
+
+    # Update these paths to match your local environment
+    OUTPUT_CSV = "data/sen_1_2/cleaned_triplets.csv"
+    DATA_ROOT = "data/sen_1_2/"
+
+    clean_dataset_full_scan(OUTPUT_CSV, DATA_ROOT)
