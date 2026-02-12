@@ -1,4 +1,10 @@
-![Python](https://img.shields.io/badge/Python-3.11-blue)
+# Multimodal SAR-optical Fusion
+
+![Python](https://img.shields.io/badge/Python-3.x-3776AB?style=flat&logo=python&logoColor=white)
+![Model](https://img.shields.io/badge/Model-Pix2Pix-orange?style=flat)
+![PSNR](https://img.shields.io/badge/PSNR-27.18_dB-success?style=flat)
+![SSIM](https://img.shields.io/badge/SSIM-0.791-success?style=flat)
+![Status](https://img.shields.io/badge/Status-Jan_2026-lightgrey?style=flat)
 
 # Multimodal SAR-optical fusion for cloud removal in Sentinel-2 imagery
 
