@@ -1,3 +1,5 @@
+![Python](https://img.shields.io/badge/Python-3.11-blue)
+
 # Multimodal SAR-optical fusion for cloud removal in Sentinel-2 imagery
 
 **Cloud removal framework using conditional GANs and multi-seasonal SAR-optical data fusion** 
